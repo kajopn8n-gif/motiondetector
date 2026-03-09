@@ -96,8 +96,7 @@
     height: 100%;
     object-fit: cover;
   }
-  .camera-wrapper video { transform: scaleX(-1); }
-  .camera-wrapper canvas { transform: scaleX(-1); z-index: 2; }
+  /* NO mirror flip — natural view */
 
   .camera-overlay {
     position: absolute;
@@ -390,17 +389,6 @@
   .feedback-bar.good { color: var(--accent); border-color: rgba(200,255,0,0.2); }
   .feedback-bar.warn { color: var(--orange); border-color: rgba(255,138,0,0.2); }
 
-  .compat-notice {
-    margin-top: 12px;
-    background: rgba(255,138,0,0.08);
-    border: 1px solid rgba(255,138,0,0.2);
-    border-radius: 12px;
-    padding: 12px 16px;
-    font-size: 12px;
-    color: var(--orange);
-    display: none;
-  }
-
   @media (max-width: 480px) {
     .camera-wrapper { aspect-ratio: 3/4; }
     .exercise-btn { padding: 10px 4px; font-size: 10px; }
@@ -492,10 +480,6 @@
     <span class="fb-icon">ℹ️</span>
     <span id="feedbackText">Wybierz ćwiczenie i włącz kamerę, aby zacząć trening.</span>
   </div>
-
-  <div class="compat-notice" id="compatNotice">
-    ⚠️ Twoja przeglądarka może nie wspierać TensorFlow.js. Zalecamy Chrome 90+ lub Safari 15.4+.
-  </div>
 </div>
 
 <script>
@@ -510,25 +494,15 @@ let timerInterval = null;
 let startTime = null;
 let animFrameId = null;
 
-// State machine — IMPROVED anti-false-positive
 let exerciseState = 'idle';
 let stateHoldFrames = 0;
-const DEBOUNCE_FRAMES = 7;       // need 7 consecutive frames in new phase
+const DEBOUNCE_FRAMES = 7;
 let lastRepTime = 0;
-const REP_COOLDOWN_MS = 500;     // min 500ms between reps
+const REP_COOLDOWN_MS = 500;
 let consecutiveNullFrames = 0;
 
-// Angle smoothing over N frames
 const SMOOTH_SIZE = 5;
 let angleBuffers = {};
-
-// ==================== COMPAT CHECK ====================
-(function checkCompat() {
-  const ua = navigator.userAgent;
-  if (/Android\s[4-7]/i.test(ua) || /Chrome\/[1-7][0-9]\./i.test(ua)) {
-    document.getElementById('compatNotice').style.display = 'block';
-  }
-})();
 
 // ==================== KEYPOINTS ====================
 const L_SHOULDER = 5, R_SHOULDER = 6;
@@ -569,7 +543,6 @@ function smooth(val, key) {
   if (!angleBuffers[key]) angleBuffers[key] = [];
   angleBuffers[key].push(val);
   if (angleBuffers[key].length > SMOOTH_SIZE) angleBuffers[key].shift();
-  // Use median for robustness
   const sorted = [...angleBuffers[key]].sort((a, b) => a - b);
   return sorted[Math.floor(sorted.length / 2)];
 }
@@ -580,13 +553,24 @@ function bestSide(kps, lIds, rIds) {
   const lOk = ok(lA) && ok(lB) && ok(lC);
   const rOk = ok(rA) && ok(rB) && ok(rC);
   if (lOk && rOk) {
-    const lScore = Math.min(lA.score, lB.score, lC.score);
-    const rScore = Math.min(rA.score, rB.score, rC.score);
-    return rScore > lScore ? angle(rA, rB, rC) : angle(lA, lB, lC);
+    return Math.min(lA.score, lB.score, lC.score) >= Math.min(rA.score, rB.score, rC.score)
+      ? angle(lA, lB, lC) : angle(rA, rB, rC);
   }
   if (lOk) return angle(lA, lB, lC);
   if (rOk) return angle(rA, rB, rC);
   return null;
+}
+
+function getBestMid(kps, li, ri) {
+  const l = kps[li], r = kps[ri];
+  if (ok(l) && ok(r)) return mid(l, r);
+  if (ok(l)) return l;
+  if (ok(r)) return r;
+  return null;
+}
+
+function result(phase, feedback, rawAngle) {
+  return { phase, feedback, rawAngle, minAngle: 40, maxAngle: 180 };
 }
 
 // ==================== EXERCISE DETECTION ====================
@@ -599,8 +583,6 @@ function detectPushups(kps) {
   const raw = bestSide(kps, [L_SHOULDER, L_ELBOW, L_WRIST], [R_SHOULDER, R_ELBOW, R_WRIST]);
   if (raw === null) return result(null, 'Ustaw się bokiem – ramiona muszą być widoczne', 0);
   const a = smooth(raw, 'pu');
-
-  // Strict thresholds with wide dead zone
   if (a < 85)  return result('down', `Dół ✓ (${a.toFixed(0)}°)`, a);
   if (a > 155) return result('up',   `Góra ✓ (${a.toFixed(0)}°)`, a);
   return result(null, `Ruch... ${a.toFixed(0)}°`, a);
@@ -610,7 +592,6 @@ function detectSquats(kps) {
   const raw = bestSide(kps, [L_HIP, L_KNEE, L_ANKLE], [R_HIP, R_KNEE, R_ANKLE]);
   if (raw === null) return result(null, 'Ustaw się bokiem – nogi muszą być widoczne', 0);
   const a = smooth(raw, 'sq');
-
   if (a < 95)  return result('down', `Dół ✓ (${a.toFixed(0)}°)`, a);
   if (a > 165) return result('up',   `Góra ✓ (${a.toFixed(0)}°)`, a);
   return result(null, `Ruch... ${a.toFixed(0)}°`, a);
@@ -621,10 +602,8 @@ function detectCrunches(kps) {
   const hip = getBestMid(kps, L_HIP, R_HIP);
   const knee = getBestMid(kps, L_KNEE, R_KNEE);
   if (!shoulder || !hip || !knee) return result(null, 'Połóż się bokiem do kamery, kolana zgięte', 0);
-
   const raw = angle(shoulder, hip, knee);
   const a = smooth(raw, 'cr');
-
   if (a < 60)  return result('up',   `Góra ✓ (${a.toFixed(0)}°)`, a);
   if (a > 130) return result('down', `Dół ✓ (${a.toFixed(0)}°)`, a);
   return result(null, `Ruch... ${a.toFixed(0)}°`, a);
@@ -649,69 +628,38 @@ function detectJJ(kps) {
   if (ok(lA) && ok(rA)) legR = dist(lA, rA) / sw;
   const sLeg = smooth(legR, 'jjl');
 
-  // Both arms AND legs must clearly agree
-  if (sArm > 135 && sLeg > 1.4)  return result('up',   `Rozłóż ✓`, sArm);
-  if (sArm < 45  && sLeg < 0.85) return result('down', `Zamknij ✓`, sArm);
+  if (sArm > 135 && sLeg > 1.4)  return result('up',   'Rozłóż ✓', sArm);
+  if (sArm < 45  && sLeg < 0.85) return result('down', 'Zamknij ✓', sArm);
   return result(null, `Ramiona: ${sArm.toFixed(0)}° Nogi: ${sLeg.toFixed(1)}x`, sArm);
 }
 
-function getBestMid(kps, li, ri) {
-  const l = kps[li], r = kps[ri];
-  if (ok(l) && ok(r)) return mid(l, r);
-  if (ok(l)) return l;
-  if (ok(r)) return r;
-  return null;
-}
-
-function result(phase, feedback, rawAngle) {
-  return { phase, feedback, rawAngle, minAngle: 40, maxAngle: 180 };
-}
-
-// ==================== REP COUNTING (IMPROVED) ====================
+// ==================== REP COUNTING ====================
 function processRepState(phase) {
   if (!isCounting) return false;
-
   if (phase === null) {
     consecutiveNullFrames++;
-    // If too many null frames, we lost tracking — don't accumulate
     if (consecutiveNullFrames > 15) stateHoldFrames = 0;
     return false;
   }
   consecutiveNullFrames = 0;
+  if (phase === exerciseState) { stateHoldFrames = 0; return false; }
 
-  // Same phase as current state — stable, reset counter
-  if (phase === exerciseState) {
-    stateHoldFrames = 0;
-    return false;
-  }
-
-  // Different phase — accumulate frames
   stateHoldFrames++;
   if (stateHoldFrames < DEBOUNCE_FRAMES) return false;
 
-  // Cooldown — prevent rapid double-count
   const now = Date.now();
-  if (now - lastRepTime < REP_COOLDOWN_MS) {
-    stateHoldFrames = 0;
-    return false;
-  }
+  if (now - lastRepTime < REP_COOLDOWN_MS) { stateHoldFrames = 0; return false; }
 
   stateHoldFrames = 0;
   const prev = exerciseState;
   exerciseState = phase;
-
-  // First real state from idle — never counts
   if (prev === 'idle') return false;
 
-  // Count on correct full cycle
   const countTransition = currentExercise === 'crunches'
     ? (prev === 'up' && phase === 'down')
     : (prev === 'down' && phase === 'up');
 
-  if (countTransition) {
-    lastRepTime = now;
-    return true;
-  }
+  if (countTransition) { lastRepTime = now; return true; }
   return false;
 }
 
@@ -733,7 +681,6 @@ function startCountdown() {
 
     let count = 3;
     numEl.textContent = count;
-
     const iv = setInterval(() => {
       count--;
       if (count > 0) {
@@ -751,19 +698,15 @@ function startCountdown() {
 // ==================== DRAWING ====================
 function drawSkeleton(keypoints) {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
-  const color = isCounting ? [200, 255, 0] : [100, 100, 120];
+  const color = isCounting ? '200,255,0' : '100,100,120';
 
   ctx.lineWidth = 3;
   ctx.lineCap = 'round';
   for (const [i, j] of SKELETON) {
     const a = keypoints[i], b = keypoints[j];
     if (a.score > 0.3 && b.score > 0.3) {
-      const al = Math.min(a.score, b.score);
-      ctx.strokeStyle = `rgba(${color},${al})`;
-      ctx.beginPath();
-      ctx.moveTo(a.x, a.y);
-      ctx.lineTo(b.x, b.y);
-      ctx.stroke();
+      ctx.strokeStyle = `rgba(${color},${Math.min(a.score, b.score)})`;
+      ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
     }
   }
   for (const p of keypoints) {
@@ -892,14 +835,15 @@ async function toggleCamera() {
     canvas = document.getElementById('canvas');
     ctx = canvas.getContext('2d');
 
+    // *** FRONT CAMERA FIRST, fallback to rear ***
     let stream;
     try {
       stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: 'environment', width: { ideal: 640 }, height: { ideal: 480 } }
+        video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } }
       });
     } catch (e) {
       stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } }
+        video: { facingMode: 'environment', width: { ideal: 640 }, height: { ideal: 480 } }
       });
     }
     video.srcObject = stream;
